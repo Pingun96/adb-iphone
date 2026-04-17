@@ -1,4 +1,4 @@
-# Phác thảo cấu hình ADB (Bản Cưỡng chế Tuyệt đối)
+# Phác thảo cấu hình ADB (Bản Sản xuất Thực tế)
 workflows:
   ios-workflow:
     name: Build ADB Mobile for iPhone
@@ -10,21 +10,28 @@ workflows:
       - name: Get Flutter packages
         script: |
           flutter pub get
-      - name: Hack Xcode Config (Remove Restrictions)
+      - name: Build iOS Engine (Bypass Apple Gatekeeper)
         script: |
-          # Xóa sạch mọi dấu vết của Development Team và Provisioning Profile
-          sed -i '' 's/DEVELOPMENT_TEAM = [^;]*;//g' ios/Runner.xcodeproj/project.pbxproj
-          sed -i '' 's/PROVISIONING_PROFILE_SPECIFIER = [^;]*;//g' ios/Runner.xcodeproj/project.pbxproj
-          sed -i '' 's/CODE_SIGN_STYLE = Automatic;//g' ios/Runner.xcodeproj/project.pbxproj
-      - name: Build IPA (Force No-Sign)
-        script: |
-          # Dùng lệnh build IPA chính thức nhưng bỏ qua chữ ký
-          flutter build ipa --no-codesign --release
+          # Dùng lệnh build ios chuẩn nhưng ép các cờ tắt chữ ký ở mức hệ thống
+          flutter build ios --release --no-codesign \
+            --extra-gen-snapshot-options="--no-incremental-analyzer" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            DEVELOPMENT_TEAM=""
           
-          # Đổi tên và đưa ra thư mục Artifact
-          find build/ios/archive -name "*.xcarchive" -exec cp -r {}/Products/Applications/Runner.app . \;
-          mkdir -p Payload
-          mv Runner.app Payload/
-          zip -r ADB_Pro.ipa Payload
+          # Kiểm tra và đóng gói
+          if [ -d "build/ios/iphoneos/Runner.app" ]; then
+            mkdir -p Payload
+            cp -r build/ios/iphoneos/Runner.app Payload/
+            zip -r ADB_Pro.ipa Payload
+            echo "Thành công! File đã được tạo."
+          else
+            echo "Lỗi: Không tìm thấy Runner.app. Đang thử cách dự phòng..."
+            # Cách dự phòng: Build Archive
+            flutter build ipa --no-codesign --release
+            cp -r build/ios/archive/Runner.xcarchive/Products/Applications/Runner.app Payload/
+            zip -r ADB_Pro.ipa Payload
+          fi
     artifacts:
       - "*.ipa"
