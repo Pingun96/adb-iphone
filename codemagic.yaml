@@ -1,4 +1,4 @@
-# Phác thảo cấu hình tự động build iOS (Hủy bỏ bắt buộc chữ ký Xcode)
+# Phác thảo cấu hình ADB (Bản Cưỡng chế Thành công)
 workflows:
   ios-workflow:
     name: Build ADB Mobile for iPhone
@@ -10,23 +10,21 @@ workflows:
       - name: Get Flutter packages
         script: |
           flutter pub get
-      - name: Build iOS WITHOUT Signing (Force Bypass)
+      - name: Build iOS No-Sign (Final Fix)
         script: |
-          # Ép Xcode build cho thiết bị thật nhưng bỏ qua bước kiểm tra Team/Profile
+          # Dùng xcodebuild flag để ép không ký tên
           flutter build ios --release --no-codesign \
-            --extra-front-end-options="--no-incremental-analyzer"
+            --extra-gen-snapshot-options="--no-incremental-analyzer"
           
-          # Thủ thuật tạo Payload để Sideloadly nhận diện
-          cd build/ios/iphoneos
-          mkdir -p Payload
-          cp -r Runner.app Payload/
-          zip -r ADB_Pro.ipa Payload
-          
-          # Di chuyển ra ngoài để Codemagic thu thập
-          mv ADB_Pro.ipa ../../..
+          # Đổi tên và đóng gói vào thư mục Artifact hợp lệ
+          APP_PATH=$(find build/ios/iphoneos -name "*.app" | head -n 1)
+          if [ -d "$APP_PATH" ]; then
+            mkdir -p Payload
+            cp -r "$APP_PATH" Payload/
+            zip -vr ADB_Pro.ipa Payload
+          else
+            echo "Lỗi: Không tìm thấy file .app để đóng gói!"
+            exit 1
+          fi
     artifacts:
       - "*.ipa"
-    publishing:
-      email:
-        recipients:
-          - your-email@example.com
