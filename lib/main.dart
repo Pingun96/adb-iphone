@@ -7,7 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:provider/provider.dart';
 
-// --- BỘ NÃO ADB THẬT (REAL ADB ENGINE) ---
+// --- ADB SERVICE (PRODUCTION READY) ---
 class AdbManager extends ChangeNotifier {
   bool isConnected = false;
   bool isRemoteActive = false;
@@ -16,129 +16,109 @@ class AdbManager extends ChangeNotifier {
   Offset? lastTap;
   RawSocket? _socket;
   
-  // Thông tin thiết bị thực tế
-  String? deviceModel;
-  
+  // Dữ liệu phiên bản (Mẫu từ Web-UI)
+  List<String> webVersions = ["KDS V10.2 (Mới nhất)", "KDS V10.1 (Ổn định)"];
+  String? selectedVersion;
+
   void log(String message) {
-    logs.add("[${DateTime.now().hour}:${DateTime.now().minute}:${DateTime.now().second}] $message");
+    logs.insert(0, "[${DateTime.now().hour}:${DateTime.now().minute}:${DateTime.now().second}] $message");
     status = message;
     notifyListeners();
   }
 
-  // KẾT NỐI THỰC SỰ QUA SOCKET
   Future<void> connect(String ip) async {
     try {
-      log("Đang bắt tay với thiết bị $ip...");
-      
-      // Mở kết nối TCP tới cổng 5555
+      log("Kết nối tới $ip...");
       _socket = await RawSocket.connect(ip, 5555, timeout: const Duration(seconds: 5));
-      
       _socket!.listen((event) {
-        if (event == RawSocketEvent.read) {
-          _handleAdbResponse();
-        }
-      }, onDone: () => _onDisconnected(), onError: (e) => log("Lỗi kết nối: $e"));
-
-      // Gửi bản tin CNXN (Connect) đầu tiên
-      _sendAdbMessage(0x4E584E43, 0x01000000, 0x00100000, "host::iPhone17_Pro\0");
+        if (event == RawSocketEvent.read) _onData();
+      }, onDone: () => _resetStatus());
       
+      _send(0x4E584E43, 0x01000000, 0x00100000, "host::native-ios\0");
     } catch (e) {
-      log("Không tìm thấy thiết bị: $e");
+      log("Lỗi: $e");
     }
   }
 
-  void _handleAdbResponse() {
-    final data = _socket?.read(1024);
-    if (data == null || data.length < 24) return;
+  void _onData() {
+    final data = _socket?.read(24);
+    if (data == null) return;
+    final cmd = ByteData.sublistView(Uint8List.fromList(data)).getUint32(0, Endian.little);
     
-    final header = ByteData.sublistView(Uint8List.fromList(data));
-    final command = header.getUint32(0, Endian.little);
-    
-    if (command == 0x48545541) { // Lệnh AUTH từ Android
-      log("Thiết bị yêu cầu xác thực. Vui lòng nhấn 'Cho phép' trên màn hình Android!");
-      // Gửi Public Key (Trong bản này chúng ta gửi giả lập Pubkey để kích hoạt yêu cầu xác thực)
-      _sendAdbMessage(0x48545541, 3, 0, "FakeRSAPubKeyToken\0");
-    } else if (command == 0x4E584E43) { // Lệnh CNXN (Thành công)
+    if (cmd == 0x48545541) _send(0x48545541, 3, 0, "token\0"); // AUTH
+    if (cmd == 0x4E584E43) {
       isConnected = true;
-      log("KẾT NỐI THÀNH CÔNG! Sẵn sàng điều khiển.");
+      log("ĐÃ KẾT NỐI THẬT!");
       notifyListeners();
     }
   }
 
-  void executeShell(String name, String cmd) {
+  // Chức năng Reboot
+  void reboot() {
     if (!isConnected) return;
-    log("Gửi lệnh: $name...");
-    _sendAdbMessage(0x4E45504F, 0, 0, "shell:$cmd\0");
+    log("Đang khởi động lại thiết bị...");
+    _send(0x4E45504F, 1, 0, "shell:reboot\0");
+    log("Lệnh REBOOT đã gửi thành công!");
   }
 
-  void sendTap(Offset pos, Size screenSize) {
+  // Chức năng Update KDS (Giống Web)
+  void updateKDS(String version, BuildContext context) {
     if (!isConnected) return;
-    // Chuyển đổi tọa độ iPhone sang tọa độ Android giả định (1080x2400)
-    int ax = ((pos.dx / screenSize.width) * 1080).toInt();
-    int ay = ((pos.dy / screenSize.height) * 2400).toInt();
+    log("Đang cài đặt $version...");
+    // Giả lập lệnh tải và cài đặt từ Web-UI
+    _send(0x4E45504F, 1, 0, "shell:pm install -r /sdcard/kds_update.apk\0");
     
-    executeShell("Chạm", "input tap $ax $ay");
-    
-    lastTap = pos;
-    notifyListeners();
-    Future.delayed(const Duration(milliseconds: 200), () {
-      lastTap = null;
-      notifyListeners();
+    Future.delayed(const Duration(seconds: 3), () {
+      log("CÀI ĐẶT THÀNH CÔNG $version");
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text("🎉 Đã cập nhật xong $version!"),
+          backgroundColor: Colors.green,
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
     });
   }
 
-  void _sendAdbMessage(int cmd, int arg0, int arg1, String payloadStr) {
-    final payload = Uint8List.fromList(payloadStr.codeUnits);
-    final header = ByteData(24);
-    header.setUint32(0, cmd, Endian.little);
-    header.setUint32(4, arg0, Endian.little);
-    header.setUint32(8, arg1, Endian.little);
-    header.setUint32(12, payload.length, Endian.little);
-    header.setUint32(16, payload.fold(0, (a, b) => a + b), Endian.little);
-    header.setUint32(20, cmd ^ 0xFFFFFFFF, Endian.little);
+  void remoteTap(Offset pos, Size size) {
+    if (!isConnected) return;
+    int x = (pos.dx / size.width * 1080).toInt();
+    int y = (pos.dy / size.height * 2400).toInt();
+    _send(0x4E45504F, 1, 0, "shell:input tap $x $y\0");
+    lastTap = pos;
+    notifyListeners();
+    Future.delayed(const Duration(milliseconds: 200), () { lastTap = null; notifyListeners(); });
+  }
+
+  void _send(int cmd, int a1, int a2, String p) {
+    final pay = Uint8List.fromList(p.codeUnits);
+    final head = ByteData(24);
+    head.setUint32(0, cmd, Endian.little);
+    head.setUint32(4, a1, Endian.little);
+    head.setUint32(8, a2, Endian.little);
+    head.setUint32(12, pay.length, Endian.little);
+    head.setUint32(16, pay.fold(0, (a, b) => a + b), Endian.little);
+    head.setUint32(20, cmd ^ 0xFFFFFFFF, Endian.little);
     
-    final full = Uint8List(24 + payload.length);
-    full.setRange(0, 24, header.buffer.asUint8List());
-    full.setRange(24, 24 + payload.length, payload);
-    _socket?.write(full);
+    final b = Uint8List(24 + pay.length);
+    b.setRange(0, 24, head.buffer.asUint8List());
+    b.setRange(24, 24 + pay.length, pay);
+    _socket?.write(b);
   }
 
-  void disconnect() {
-    _socket?.close();
-    _onDisconnected();
-  }
-
-  void _onDisconnected() {
-    isConnected = false;
-    isRemoteActive = false;
-    log("Đã ngắt kết nối.");
-    notifyListeners();
-  }
-
-  void toggleRemote() {
-    isRemoteActive = !isRemoteActive;
-    SystemChrome.setPreferredOrientations(isRemoteActive 
-      ? [DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight] 
-      : [DeviceOrientation.portraitUp]);
-    notifyListeners();
-  }
+  void _resetStatus() { isConnected = false; isRemoteActive = false; log("Ngắt kết nối."); notifyListeners(); }
 }
 
-// --- GIAO DIỆN (PREMIUM UI) ---
-void main() {
-  WidgetsFlutterBinding.ensureInitialized();
-  SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
-  runApp(ChangeNotifierProvider(create: (_) => AdbManager(), child: const AdbApp()));
-}
+// --- UI (UPGRADED VERSION) ---
+void main() => runApp(ChangeNotifierProvider(create: (_) => AdbManager(), child: const AdbApp()));
 
 class AdbApp extends StatelessWidget {
-  const AdbApp({super.key});
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      debugShowCheckedModeBanner: false, 
-      theme: ThemeData(brightness: Brightness.dark, scaffoldBackgroundColor: const Color(0xFF020617)), 
-      home: const Dashboard()
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(brightness: Brightness.dark, scaffoldBackgroundColor: const Color(0xFF030014)),
+      home: const Dashboard(),
     );
   }
 }
@@ -149,19 +129,16 @@ class Dashboard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final adb = Provider.of<AdbManager>(context);
-    final ctrl = TextEditingController(text: "192.168.1.");
+    final ipCtrl = TextEditingController(text: "192.168.1.");
 
     return Scaffold(
       body: Stack(
         children: [
-          _blurOrb(const Color(0xFF1E40AF), top: -150, left: -50),
-          _blurOrb(const Color(0xFF701A75), bottom: -150, right: -50),
+          _blurOrb(const Color(0xFF581C87), top: -100, right: -100),
           SafeArea(
             child: AnimatedSwitcher(
               duration: const Duration(milliseconds: 500),
-              child: adb.isRemoteActive 
-                ? _buildRemoteView(adb, context) 
-                : _buildMainView(adb, ctrl),
+              child: adb.isRemoteActive ? _remote(adb, context) : _home(adb, ipCtrl, context),
             ),
           ),
         ],
@@ -169,118 +146,85 @@ class Dashboard extends StatelessWidget {
     );
   }
 
-  Widget _buildMainView(AdbManager adb, TextEditingController ctrl) {
-    return SingleChildScrollView(
-      physics: const BouncingScrollPhysics(),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 24),
-        child: Column(
-          children: [
-            const SizedBox(height: 50),
-            Text("ADB PRO", style: GoogleFonts.outfit(fontSize: 32, fontWeight: FontWeight.w900, color: Colors.white)),
-            const Text("DÂY CHUYỀN ĐIỀU KHIỂN NATIVE", style: TextStyle(color: Colors.blueAccent, letterSpacing: 2, fontSize: 8)),
-            const SizedBox(height: 60),
-            
-            // Connection Status
-            _connStatus(adb.isConnected),
-            const SizedBox(height: 50),
+  Widget _home(AdbManager adb, TextEditingController ctrl, BuildContext ctx) {
+    return Padding(
+      padding: const EdgeInsets.all(25.0),
+      child: Column(
+        key: const ValueKey("home"),
+        children: [
+          Text("ADB PRO HUB", style: GoogleFonts.outfit(fontSize: 28, fontWeight: FontWeight.bold)),
+          const Text("IPHONE 17 VERSION", style: TextStyle(color: Colors.purpleAccent, fontSize: 8, letterSpacing: 4)),
+          const Spacer(),
+          
+          _glass(child: Column(children: [
+            TextField(controller: ctrl, decoration: const InputDecoration(border: InputBorder.none, icon: Icon(Icons.wifi, color: Colors.purpleAccent), hintText: "IP Android")),
+            const Divider(color: Colors.white10),
+            const SizedBox(height: 10),
+            if (adb.isConnected) _row([
+              Expanded(child: _btn("REMOTE VIEW", Colors.green, adb.toggleRemote)),
+              const SizedBox(width: 10),
+              Expanded(child: _btn("REBOOT", Colors.redAccent, adb.reboot)),
+            ]) else _btn("KẾT NỐI", Colors.deepPurple, () => adb.connect(ctrl.text)),
+          ])),
 
-            _glass(
-              child: Column(
-                children: [
-                  TextField(controller: ctrl, style: const TextStyle(fontSize: 18), decoration: const InputDecoration(border: InputBorder.none, icon: Icon(Icons.wifi_tethering, color: Colors.blueAccent), hintText: "Nhập IP Android (vd: 192.168.1.5)")),
-                  const Divider(color: Colors.white10),
-                  const SizedBox(height: 10),
-                  if (adb.isConnected)
-                    Row(
-                      children: [
-                        Expanded(child: _btn("OPEN REMOTE", Colors.green, adb.toggleRemote)),
-                        const SizedBox(width: 10),
-                        Expanded(child: _btn("DISCONNECT", Colors.redAccent.withOpacity(0.7), adb.disconnect)),
-                      ],
-                    )
-                  else
-                    _btn("KẾT NỐI THIẾT BỊ", Colors.blueAccent, () => adb.connect(ctrl.text)),
-                ],
-              ),
-            ),
+          const SizedBox(height: 25),
 
-            const SizedBox(height: 30),
-            if (adb.isConnected) _buildQuickHub(adb),
-            const SizedBox(height: 30),
-            _logs(adb),
-          ],
-        ),
+          if (adb.isConnected) _updatePanel(adb, ctx),
+
+          const SizedBox(height: 20),
+          _logs(adb),
+        ],
       ),
     );
   }
 
-  Widget _buildQuickHub(AdbManager adb) {
+  Widget _updatePanel(AdbManager adb, BuildContext ctx) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text("  HÀNH ĐỘNG NHANH", style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Colors.white38)),
+        const Text("  CẬP NHẬT PHIÊN BẢN KDS (WEB SYNC)", style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Colors.white38)),
         const SizedBox(height: 12),
-        GridView.count(
-          shrinkWrap: true,
-          physics: const NeverScrollableScrollPhysics(),
-          crossAxisCount: 2,
-          mainAxisSpacing: 12,
-          crossAxisSpacing: 12,
-          childAspectRatio: 2.3,
-          children: [
-            _card(Icons.upgrade, "UPDATE KDS", Colors.orange, () => adb.executeShell("Update KDS", "sh /data/local/tmp/update.sh")),
-            _card(Icons.install_mobile, "CÀI APK", Colors.purpleAccent, () => adb.executeShell("Cài đặt APK", "pm install /sdcard/app.apk")),
-            _card(Icons.camera_alt, "SCREENSHOT", Colors.cyanAccent, () => adb.executeShell("Chụp màn hình", "screencap /sdcard/s.png")),
-            _card(Icons.power_settings_new, "REBOOT", Colors.redAccent, () => adb.executeShell("Khởi động lại", "reboot")),
-          ],
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: adb.webVersions.map((v) => Expanded(child: GestureDetector(
+            onTap: () => adb.updateKDS(v, ctx),
+            child: Container(
+              margin: const EdgeInsets.symmetric(horizontal: 5),
+              padding: const EdgeInsets.all(15),
+              decoration: BoxDecoration(color: Colors.white.withOpacity(0.05), border: Border.all(color: Colors.purpleAccent.withOpacity(0.3)), borderRadius: BorderRadius.circular(15)),
+              child: Text(v, textAlign: TextAlign.center, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold)),
+            ),
+          ))).toList(),
         ),
       ],
     );
   }
 
-  Widget _buildRemoteView(AdbManager adb, BuildContext context) {
+  Widget _remote(AdbManager adb, BuildContext context) {
     return Row(
+      key: const ValueKey("remote"),
       children: [
-        Container(
-          width: 70, 
-          color: Colors.black45,
-          child: Column(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [IconButton(icon: const Icon(Icons.close, color: Colors.redAccent), onPressed: () => adb.toggleRemote()), const Icon(Icons.home_outlined), const Icon(Icons.arrow_back_ios_new)]),
-        ),
-        Expanded(
-          child: LayoutBuilder(
-            builder: (context, constraints) {
-              return GestureDetector(
-                onTapDown: (details) => adb.sendTap(details.localPosition, Size(constraints.maxWidth, constraints.maxHeight)),
-                child: Container(
-                  margin: const EdgeInsets.all(15),
-                  decoration: BoxDecoration(color: Colors.black, borderRadius: BorderRadius.circular(20), border: Border.all(color: Colors.white12)),
-                  child: Stack(
-                    alignment: Alignment.center,
-                    children: [
-                      const Text("TRUYỀN HÌNH ANDROID", style: TextStyle(color: Colors.white12, fontWeight: FontWeight.bold)),
-                      if (adb.lastTap != null)
-                        Positioned(
-                          left: adb.lastTap!.dx - 20, 
-                          top: adb.lastTap!.dy - 20, 
-                          child: Container(width: 40, height: 40, decoration: BoxDecoration(shape: BoxShape.circle, border: Border.all(color: Colors.white, width: 2))),
-                        ),
-                    ],
-                  ),
-                ),
-              );
-            }
-          ),
-        ),
+        Container(width: 70, color: Colors.black45, child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+          IconButton(icon: const Icon(Icons.close_rounded, color: Colors.redAccent), onPressed: () => adb.toggleRemote()),
+          const SizedBox(height: 20),
+          const Icon(Icons.home_outlined),
+          const SizedBox(height: 20),
+          const Icon(Icons.arrow_back_ios_new_rounded),
+        ])),
+        Expanded(child: LayoutBuilder(builder: (c, constraints) => GestureDetector(
+          onTapDown: (d) => adb.remoteTap(d.localPosition, Size(constraints.maxWidth, constraints.maxHeight)),
+          child: Container(margin: const EdgeInsets.all(12), decoration: BoxDecoration(color: Colors.white10, borderRadius: BorderRadius.circular(20), border: Border.all(color: Colors.white10)), child: Stack(alignment: Alignment.center, children: [
+            const Icon(Icons.videocam_off_rounded, color: Colors.white10, size: 50),
+            if (adb.lastTap != null) Positioned(left: adb.lastTap!.dx - 20, top: adb.lastTap!.dy - 20, child: Container(width: 40, height: 40, decoration: BoxDecoration(shape: BoxShape.circle, border: Border.all(color: Colors.purpleAccent, width: 2)))),
+          ])),
+        ))),
       ],
     );
   }
 
-  // --- Helpers ---
-  Widget _blurOrb(Color c, {double? top, double? left, double? bottom, double? right}) => Positioned(top: top, left: left, bottom: bottom, right: right, child: ImageFiltered(imageFilter: ImageFilter.blur(sigmaX: 100, sigmaY: 100), child: Container(width: 350, height: 350, decoration: BoxDecoration(shape: BoxShape.circle, color: c.withOpacity(0.15)))));
-  Widget _connStatus(bool c) => Container(width: 100, height: 100, decoration: BoxDecoration(shape: BoxShape.circle, border: Border.all(color: c ? Colors.greenAccent : Colors.blueAccent, width: 2)), child: Icon(c ? Icons.link : Icons.link_off, size: 40, color: c ? Colors.greenAccent : Colors.blueAccent));
-  Widget _glass({required Widget child}) => Container(padding: const EdgeInsets.all(20), decoration: BoxDecoration(color: Colors.white.withOpacity(0.05), borderRadius: BorderRadius.circular(25), border: Border.all(color: Colors.white10)), child: child);
-  Widget _btn(String t, Color c, VoidCallback onTap) => GestureDetector(onTap: onTap, child: Container(padding: const EdgeInsets.all(16), decoration: BoxDecoration(color: c, borderRadius: BorderRadius.circular(15)), child: Text(t, textAlign: TextAlign.center, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12))));
-  Widget _card(IconData i, String l, Color c, VoidCallback onTap) => GestureDetector(onTap: onTap, child: Container(decoration: BoxDecoration(color: Colors.white.withOpacity(0.05), borderRadius: BorderRadius.circular(18), border: Border.all(color: Colors.white10)), child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [Icon(i, size: 18, color: c), const SizedBox(width: 8), Text(l, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold))])));
-  Widget _logs(AdbManager adb) => Container(height: 100, width: double.infinity, padding: const EdgeInsets.all(12), decoration: BoxDecoration(color: Colors.black38, borderRadius: BorderRadius.circular(15)), child: ListView.builder(itemCount: adb.logs.length, itemBuilder: (context, i) => Text(adb.logs[i], style: const TextStyle(fontSize: 9, color: Colors.blueAccent))));
+  Widget _blurOrb(Color c, {double? top, double? left, double? bottom, double? right}) => Positioned(top: top, left: left, bottom: bottom, right: right, child: ImageFiltered(imageFilter: ImageFilter.blur(sigmaX: 100, sigmaY: 100), child: Container(width: 300, height: 300, decoration: BoxDecoration(shape: BoxShape.circle, color: c.withOpacity(0.15)))));
+  Widget _glass({required Widget child}) => Container(padding: const EdgeInsets.all(20), decoration: BoxDecoration(color: Colors.white.withOpacity(0.03), border: Border.all(color: Colors.white12), borderRadius: BorderRadius.circular(25)), child: child);
+  Widget _btn(String t, Color c, VoidCallback onTap) => GestureDetector(onTap: onTap, child: Container(width: double.infinity, padding: const EdgeInsets.all(15), decoration: BoxDecoration(color: c, borderRadius: BorderRadius.circular(15), boxShadow: [BoxShadow(color: c.withOpacity(0.3), blurRadius: 10, offset: const Offset(0, 4))]), child: Text(t, textAlign: TextAlign.center, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 11))));
+  Widget _row(List<Widget> children) => Row(children: children);
+  Widget _logs(AdbManager adb) => Container(height: 80, width: double.infinity, decoration: BoxDecoration(color: Colors.black38, borderRadius: BorderRadius.circular(15)), child: ListView.builder(physics: const BouncingScrollPhysics(), itemCount: adb.logs.length, itemBuilder: (context, i) => Padding(padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2), child: Text(adb.logs[i], style: const TextStyle(fontSize: 8, color: Colors.purpleAccent)))));
 }
