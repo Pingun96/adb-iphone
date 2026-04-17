@@ -1,4 +1,4 @@
-# Phác thảo cấu hình tự động build iOS cho Codemagic
+# Phác thảo cấu hình tự động build iOS (Hủy bỏ bắt buộc chữ ký Xcode)
 workflows:
   ios-workflow:
     name: Build ADB Mobile for iPhone
@@ -6,28 +6,27 @@ workflows:
     max_build_duration: 60
     environment:
       flutter: stable
-      groups:
-        - apple_auth # Nhóm này bạn sẽ cấu hình Apple ID sau nếu muốn tự động ký
-      vars:
-        XCODE_WORKSPACE: "ios/Runner.xcworkspace"
-        XCODE_SCHEME: "Runner"
     scripts:
       - name: Get Flutter packages
         script: |
           flutter pub get
-      - name: Build iOS without signing (for sideloading)
+      - name: Build iOS WITHOUT Signing (Force Bypass)
         script: |
-          flutter build ios --release --no-codesign
-      - name: Create .ipa for Sideloadly
-        script: |
-          mkdir -p build/ios/ipa
+          # Ép Xcode build cho thiết bị thật nhưng bỏ qua bước kiểm tra Team/Profile
+          flutter build ios --release --no-codesign \
+            --extra-front-end-options="--no-incremental-analyzer"
+          
+          # Thủ thuật tạo Payload để Sideloadly nhận diện
           cd build/ios/iphoneos
           mkdir -p Payload
-          mv Runner.app Payload
-          zip -r ../ipa/ADB_Pro.ipa Payload
+          cp -r Runner.app Payload/
+          zip -r ADB_Pro.ipa Payload
+          
+          # Di chuyển ra ngoài để Codemagic thu thập
+          mv ADB_Pro.ipa ../../..
     artifacts:
-      - build/ios/ipa/*.ipa
+      - "*.ipa"
     publishing:
       email:
         recipients:
-          - your-email@example.com # Bạn có thể thay đổi sau trên web
+          - your-email@example.com
