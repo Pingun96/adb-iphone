@@ -1,4 +1,4 @@
-# Phác thảo cấu hình ADB (Bản Cưỡng chế Thành công)
+# Phác thảo cấu hình ADB (Bản Cưỡng chế Tuyệt đối)
 workflows:
   ios-workflow:
     name: Build ADB Mobile for iPhone
@@ -10,21 +10,21 @@ workflows:
       - name: Get Flutter packages
         script: |
           flutter pub get
-      - name: Build iOS No-Sign (Final Fix)
+      - name: Hack Xcode Config (Remove Restrictions)
         script: |
-          # Dùng xcodebuild flag để ép không ký tên
-          flutter build ios --release --no-codesign \
-            --extra-gen-snapshot-options="--no-incremental-analyzer"
+          # Xóa sạch mọi dấu vết của Development Team và Provisioning Profile
+          sed -i '' 's/DEVELOPMENT_TEAM = [^;]*;//g' ios/Runner.xcodeproj/project.pbxproj
+          sed -i '' 's/PROVISIONING_PROFILE_SPECIFIER = [^;]*;//g' ios/Runner.xcodeproj/project.pbxproj
+          sed -i '' 's/CODE_SIGN_STYLE = Automatic;//g' ios/Runner.xcodeproj/project.pbxproj
+      - name: Build IPA (Force No-Sign)
+        script: |
+          # Dùng lệnh build IPA chính thức nhưng bỏ qua chữ ký
+          flutter build ipa --no-codesign --release
           
-          # Đổi tên và đóng gói vào thư mục Artifact hợp lệ
-          APP_PATH=$(find build/ios/iphoneos -name "*.app" | head -n 1)
-          if [ -d "$APP_PATH" ]; then
-            mkdir -p Payload
-            cp -r "$APP_PATH" Payload/
-            zip -vr ADB_Pro.ipa Payload
-          else
-            echo "Lỗi: Không tìm thấy file .app để đóng gói!"
-            exit 1
-          fi
+          # Đổi tên và đưa ra thư mục Artifact
+          find build/ios/archive -name "*.xcarchive" -exec cp -r {}/Products/Applications/Runner.app . \;
+          mkdir -p Payload
+          mv Runner.app Payload/
+          zip -r ADB_Pro.ipa Payload
     artifacts:
       - "*.ipa"
